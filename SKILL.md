@@ -11,41 +11,46 @@ commit the knowledge graph as a BZip2 zip and gitignore the raw directory
 
 Three responsibilities:
 
-1. **Read-only queries** — use `tools/graph_query.py` against the zip
-   directly. No extract, no recompress, no risk.
+1. **Read-only queries** — `find`, `explain`, `path`, `providers` against
+   the zip directly. No extract, no recompress, no risk.
 2. **Pre-rebuild extract** — unzip into `graphify-out/` so the next
    `/graphify` run sees prior cache + incremental manifest.
 3. **Post-rebuild recompress** — rebuild the zip from `graphify-out/`
    with BZip2 compression so the commit picks up the new state.
 
-## System dependency: 7z
+## How to invoke the bundled wrapper
 
-Required for compress/extract. Install once:
+The skill ships `_zipper.py` (stdlib-only) + `pyrun.sh` (cross-platform
+Python launcher that auto-detects and caches a 3.10+ interpreter).
+**Always invoke through `pyrun.sh`** — never call `python3 _zipper.py`
+directly. The launcher handles WSL/macOS/Windows interpreter differences
+and caches the resolved path in `.python_bin` next to the script.
 
-- Linux: `sudo apt install p7zip-full` (or `pacman -S p7zip`)
-- macOS: `brew install p7zip`
-- Windows: `winget install 7zip.7zip`
+```bash
+bash ~/.claude/skills/graphify-zipper/pyrun.sh _zipper.py <subcommand> [args]
+```
 
-If `7z` is missing, refuse the compress/extract path and tell the user
-to install it. Do NOT fall back to `unzip` / `zip` — the committed zip
-uses BZip2 method and stock `zip` defaults to deflate, which changes
-the archive byte-for-byte and bloats diffs.
+For brevity below, alias once per session:
+
+```bash
+ZIPPER="bash ~/.claude/skills/graphify-zipper/pyrun.sh _zipper.py"
+```
+
+All subcommands accept `--zip <path>` (default `graphify-out.zip` in cwd)
+and query subcommands accept `--json` for machine-readable output.
 
 ## Path 1 — Query without extracting (default for read-only work)
 
-`tools/graph_query.py` reads the zip directly via Python `zipfile`.
-Stdlib only, no extraction needed. **Phrase all queries in English** —
-node labels and source paths are English; Spanish terms will not match.
+The wrapper reads the zip directly via Python `zipfile`. Stdlib only, no
+extraction needed. **Phrase all queries in English** — node labels and
+source paths are English; Spanish terms will not match.
 
 ```bash
-python3 tools/graph_query.py find <english terms>          # top label/source matches
-python3 tools/graph_query.py explain <node>                # node + outgoing/incoming edges
-python3 tools/graph_query.py path <A> <B>                  # shortest path
-python3 tools/graph_query.py providers                     # list provider source files
+$ZIPPER find <english terms> [--limit N]   # top label/source matches
+$ZIPPER explain <node>                     # node + outgoing/incoming edges
+$ZIPPER path <A> <B>                       # shortest path (BFS, undirected)
+$ZIPPER providers                          # list provider source files
 ```
-
-Add `--limit N` to `find` to widen results. Output is JSON-ish; pipe
-through `jq` if the user wants filtering.
 
 **Use this path when:**
 - User asks "where is X / what calls Y / how does Z reach W".
@@ -62,33 +67,32 @@ graph: `/graphify <path>`, `/graphify --update`, `/graphify --cluster-only`,
 `/graphify add <url>`, `/graphify --wiki`.
 
 ```bash
-7z x -y graphify-out.zip
+$ZIPPER extract                # graphify-out.zip -> ./graphify-out/
+$ZIPPER extract --dir /some/path
+$ZIPPER extract --force        # overwrite existing graphify-out/
 ```
 
-`-y` auto-confirms overwrite. Result: `graphify-out/` directory in cwd
-with prior `graph.json`, semantic cache, manifest, etc. Skipping this
-step makes the next rebuild start from scratch and discards the
-incremental cache.
+Without `--force`, the wrapper refuses to clobber an existing
+`graphify-out/` — that usually means a previous run was not
+recompressed and local rebuild state might be worth preserving. Surface
+this to the user before re-running with `--force`.
 
-If `graphify-out/` already exists when extracting, that means a previous
-run was not recompressed. Surface this to the user before clobbering —
-they may have local rebuild state worth preserving.
+Skipping this step makes the next rebuild start from scratch and
+discards the incremental cache.
 
 ## Path 3 — Recompress after a rebuild
 
 Run immediately AFTER the `/graphify` subcommand finishes successfully:
 
 ```bash
-rm -f graphify-out.zip
-7z a -tzip -mx=9 -mm=BZip2 graphify-out.zip graphify-out
+$ZIPPER compress               # ./graphify-out/ -> graphify-out.zip
+$ZIPPER compress --dir /some/path --zip /some/out.zip
 ```
 
-Flags explained (do not change them — the committed zip must stay
-byte-stable so diffs are meaningful):
-
-- `-tzip` → zip container format
-- `-mx=9` → maximum compression level
-- `-mm=BZip2` → BZip2 compression method (NOT deflate)
+The wrapper uses `zipfile.ZIP_BZIP2` at level 9 — the same shape the
+committed zip already has (BZip2 method, max compression). It refuses
+to zip a directory missing `graph.json` (catches the "empty rebuild"
+trap) and pre-deletes the target zip so partial output doesn't linger.
 
 After recompress, `graphify-out/` stays on disk (gitignored). You can
 leave it or delete it; subsequent queries should use Path 1 (zip
@@ -106,23 +110,36 @@ When invoked, classify the user's intent and pick one path:
 | "descomprimí" / "unzip" alone | Path 2 only |
 | `graphify-out/` missing AND zip missing | Stop — nothing to do; ask user |
 
-Never run Path 3 without Path 2 having happened first in the same session
-(or `graphify-out/` already existing) — you would zip an empty/stale dir.
+Never run Path 3 without Path 2 having happened first in the same
+session (or `graphify-out/` already existing) — the wrapper refuses
+anyway, but surface why.
 
 Never run Path 2 without intent to rebuild — orphan directories cause
-the "already exists" trap above.
+the "already exists" guardrail above.
 
 ## Sanity check after recompress
 
-After Path 3, verify the new zip is non-empty and contains the expected
-inner path:
+The wrapper prints the new archive size. To verify the inner path:
 
 ```bash
-7z l graphify-out.zip | grep 'graphify-out/graph.json' || echo "WARN: graph.json missing in archive"
+python3 -c "import zipfile; z=zipfile.ZipFile('graphify-out.zip'); print('graphify-out/graph.json' in z.namelist())"
 ```
 
-If the warning fires, do NOT commit — investigate why the rebuild
+If it prints `False`, do NOT commit — investigate why the rebuild
 produced no graph.
+
+## Optional fallback: 7z
+
+The wrapper covers extract + compress with stdlib only, so `7z` is no
+longer required. If a user already has it installed and prefers it,
+the equivalent commands are:
+
+```bash
+7z x -y graphify-out.zip                                   # extract
+rm -f graphify-out.zip && 7z a -tzip -mx=9 -mm=BZip2 graphify-out.zip graphify-out   # compress
+```
+
+Both produce byte-compatible archives with the wrapper output.
 
 ## What this skill does NOT do
 
@@ -136,6 +153,7 @@ produced no graph.
 
 **agent-charly** (`/mnt/c/repos/agent-charly`): the extract/recompress
 pair is mandated by `CLAUDE.md` §5. `graphify-out/` is gitignored;
-`graphify-out.zip` is the committed artifact. `tools/graph_query.py`
-lives at repo root. Other repos that adopt the same pattern follow the
-same flow — only the location of `graph_query.py` may vary.
+`graphify-out.zip` is the committed artifact. The repo also ships its
+own `tools/graph_query.py`; either that or this skill's wrapper works —
+prefer the wrapper for consistency across repos that adopt the same
+pattern.

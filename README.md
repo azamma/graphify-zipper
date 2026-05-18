@@ -76,8 +76,34 @@ Three responsibilities:
 ## Install
 
 ```bash
+# Direct clone:
 git clone https://github.com/azamma/graphify-zipper ~/.claude/skills/graphify-zipper
+
+# Or via Vercel skills CLI:
+npx skills add azamma/graphify-zipper
 ```
+
+## Bundled wrapper
+
+Ships `_zipper.py` (stdlib only) + `pyrun.sh` (cross-platform Python
+launcher that caches a 3.10+ interpreter in `.python_bin`). The skill
+prefers the wrapper over external `7z` so there is no system
+dependency:
+
+```bash
+ZIPPER="bash ~/.claude/skills/graphify-zipper/pyrun.sh _zipper.py"
+$ZIPPER find <english terms>     # top-scoring nodes
+$ZIPPER explain <node>           # node + neighbors
+$ZIPPER path <A> <B>             # shortest path
+$ZIPPER providers                # list provider source files
+$ZIPPER extract [--force]        # graphify-out.zip -> graphify-out/
+$ZIPPER compress                 # graphify-out/ -> graphify-out.zip (BZip2 lvl 9)
+```
+
+Query commands accept `--json`. The wrapper refuses to compress a
+directory missing `graph.json` and refuses to clobber an existing
+`graphify-out/` without `--force` — both catch real footguns from the
+manual `7z` flow.
 
 ## Trigger phrases
 
