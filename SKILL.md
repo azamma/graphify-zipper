@@ -46,8 +46,8 @@ extraction needed. **Phrase all queries in English** — node labels and
 source paths are English; Spanish terms will not match.
 
 ```bash
+$ZIPPER explain <node>                     # node + outgoing/incoming edges (preferred)
 $ZIPPER find <english terms> [--limit N]   # top label/source matches
-$ZIPPER explain <node>                     # node + outgoing/incoming edges
 $ZIPPER path <A> <B>                       # shortest path (BFS, undirected)
 $ZIPPER providers                          # list provider source files
 ```
@@ -56,6 +56,11 @@ $ZIPPER providers                          # list provider source files
 - User asks "where is X / what calls Y / how does Z reach W".
 - Any structural/locating question before a Read.
 - User explicitly says "tirá una query al grafo" / "query the graph".
+
+**Query strategy — use both together:**
+1. Run `explain <term>` first. It gives the richest view (node + all edges + sources).
+2. If the term is not found, fall back to `find <term>` to locate close matches, then `explain` the best match.
+3. For path-tracing questions, use `path <A> <B>` directly.
 
 Do NOT extract just to query — wastes I/O and risks accidental
 recompress mismatch.
