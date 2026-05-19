@@ -46,10 +46,10 @@ extraction needed. **Phrase all queries in English** — node labels and
 source paths are English; Spanish terms will not match.
 
 ```bash
-$ZIPPER explain <node>                     # node + outgoing/incoming edges (preferred)
-$ZIPPER find <english terms> [--limit N]   # top label/source matches
+$ZIPPER explain <node>                     # PREFERRED: node + outgoing/incoming edges
 $ZIPPER path <A> <B>                       # shortest path (BFS, undirected)
 $ZIPPER providers                          # list provider source files
+$ZIPPER find <english terms> [--limit N]   # LAST RESORT: ranked label/source matches
 ```
 
 **Use this path when:**
@@ -57,10 +57,12 @@ $ZIPPER providers                          # list provider source files
 - Any structural/locating question before a Read.
 - User explicitly says "tirá una query al grafo" / "query the graph".
 
-**Query strategy — use both together:**
-1. Run `explain <term>` first. It gives the richest view (node + all edges + sources).
-2. If the term is not found, fall back to `find <term>` to locate close matches, then `explain` the best match.
-3. For path-tracing questions, use `path <A> <B>` directly.
+**Query strategy — `explain` first, `find` only as fallback:**
+1. **Always start with `explain <term>`.** Richest view: node + all edges + sources. Internally picks top scoring match by same algorithm `find` uses, then expands neighborhood.
+2. Only if `explain` exits with `no node matches`, run `find <term>` to discover near matches — then re-run `explain` on the best hit. Never stop at `find` output; it has no edges.
+3. For path-tracing ("how does A reach B"), use `path <A> <B>` directly. Skip `find`/`explain` warmup.
+
+`find` is a discovery tool of last resort. Default to `explain` even when unsure — it fails loud if the term misses, which is your signal to fall back.
 
 Do NOT extract just to query — wastes I/O and risks accidental
 recompress mismatch.
@@ -109,7 +111,7 @@ When invoked, classify the user's intent and pick one path:
 
 | User intent | Path |
 |---|---|
-| "find / where / explain / path / providers" question | Path 1 (query, no extract) |
+| "where / explain / path / providers / find" question | Path 1 (query, no extract — `explain` first, `find` only if miss) |
 | About to run `/graphify <path>` etc. | Path 2 → run `/graphify …` → Path 3 |
 | "comprimí" / "zip" alone, with `graphify-out/` present | Path 3 only |
 | "descomprimí" / "unzip" alone | Path 2 only |

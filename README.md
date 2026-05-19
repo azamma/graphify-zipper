@@ -6,7 +6,7 @@ Built for context-mesh repos that hold many service graphs side by side: query t
 
 ## Features
 
-- **Zero-extract queries** — `find`, `explain`, `path`, `providers` read straight from the zip via Python `zipfile`.
+- **Zero-extract queries** — `explain`, `path`, `providers`, `find` read straight from the zip via Python `zipfile`.
 - **Safe extract / recompress** — refuses to clobber an existing `graphify-out/` and refuses to zip a directory missing `graph.json`.
 - **Stdlib only** — bundled `_zipper.py` needs no external dependencies; `pyrun.sh` auto-detects a 3.10+ interpreter on WSL, macOS, and Windows.
 - **Byte-compatible with `7z`** — uses `ZIP_BZIP2` at level 9, matching `7z a -tzip -mx=9 -mm=BZip2` output.
@@ -31,15 +31,18 @@ Claude Code auto-discovers skills under `~/.claude/skills/`. No further setup re
 ```bash
 ZIPPER="bash ~/.claude/skills/graphify-zipper/pyrun.sh _zipper.py"
 
-$ZIPPER find auth middleware       # top-scoring node matches
-$ZIPPER explain UserService        # node + neighbors
+$ZIPPER explain UserService        # PREFERRED: node + neighbors
 $ZIPPER path Controller Repository # shortest path (BFS, undirected)
 $ZIPPER providers                  # provider source files
+$ZIPPER find auth middleware       # LAST RESORT: ranked matches when explain misses
 $ZIPPER extract [--force]          # graphify-out.zip -> ./graphify-out/
 $ZIPPER compress                   # ./graphify-out/ -> graphify-out.zip
 ```
 
 All subcommands accept `--zip <path>` (default `graphify-out.zip`). Query subcommands accept `--json` and `--limit N`.
+
+> [!TIP]
+> Always start with `explain`. It picks the top-scoring node by the same algorithm `find` uses, then expands the neighborhood (edges, relations, sources). Drop to `find` only when `explain` exits with `no node matches` — then re-run `explain` on the best hit. `find` alone has no edges.
 
 > [!NOTE]
 > Node labels and source paths in graphify output are English. Phrase queries in English; Spanish terms will not match.
@@ -50,7 +53,7 @@ The skill exposes three execution paths and picks one based on intent:
 
 | Intent | Path |
 |---|---|
-| "find / where / explain / path / providers" question | Query (no extract) |
+| "where / explain / path / providers / find" question | Query (no extract — `explain` first, `find` only on miss) |
 | About to run `/graphify <path>`, `--update`, `--cluster-only`, `add`, `--wiki` | Extract → rebuild → recompress |
 | "comprimí" / "zip" alone, with `graphify-out/` present | Recompress only |
 | "descomprimí" / "unzip" alone | Extract only |

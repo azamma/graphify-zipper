@@ -2,10 +2,11 @@
 """graphify-zipper: query + extract + compress graphify-out.zip. Stdlib only.
 
 Subcommands:
-  find <terms...>         top-scoring nodes by label/source match
-  explain <node>          node + outgoing/incoming edges
+  explain <node>          PREFERRED: node + outgoing/incoming edges (richest view)
   path <a> <b>            shortest path between two nodes (BFS undirected)
   providers               list provider/* source files seen in graph
+  find <terms...>         LAST RESORT: top-scoring nodes by label/source match
+                          (use only when explain returns no match — then explain top hit)
   extract [--zip Z] [--dir D]   unzip Z into D (default: graphify-out.zip -> .)
   compress [--dir D] [--zip Z]  build BZip2 zip from graphify-out/
 
@@ -283,14 +284,14 @@ def main(argv=None):
     p.add_argument("--json", action="store_true", help="JSON output (query cmds)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pf = sub.add_parser("find", help="find nodes by English terms")
+    pe = sub.add_parser("explain", help="PREFERRED: node + outgoing/incoming edges (use first)")
+    pe.add_argument("node")
+    pe.set_defaults(func=cmd_explain, needs_graph=True)
+
+    pf = sub.add_parser("find", help="LAST RESORT: rank nodes by terms (use only if explain misses)")
     pf.add_argument("terms", nargs="+")
     pf.add_argument("--limit", type=int, default=15)
     pf.set_defaults(func=cmd_find, needs_graph=True)
-
-    pe = sub.add_parser("explain", help="explain a node and its neighbors")
-    pe.add_argument("node")
-    pe.set_defaults(func=cmd_explain, needs_graph=True)
 
     pp = sub.add_parser("path", help="shortest path between two nodes")
     pp.add_argument("a")
