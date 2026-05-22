@@ -6,7 +6,7 @@ description: Compress, decompress, and query the committed `graphify-out.zip` kn
 # graphify-zipper
 
 Wraps the `graphify-out.zip` ↔ `graphify-out/` lifecycle for repos that
-commit the knowledge graph as a BZip2 zip and gitignore the raw directory
+commit the knowledge graph as a LZMA zip and gitignore the raw directory
 (e.g. `agent-charly`).
 
 Three responsibilities:
@@ -16,7 +16,7 @@ Three responsibilities:
 2. **Pre-rebuild extract** — unzip into `graphify-out/` so the next
    `/graphify` run sees prior cache + incremental manifest.
 3. **Post-rebuild recompress** — rebuild the zip from `graphify-out/`
-   with BZip2 compression so the commit picks up the new state.
+   with LZMA compression so the commit picks up the new state.
 
 ## How to invoke the bundled wrapper
 
@@ -47,10 +47,13 @@ source paths are English; Spanish terms will not match.
 
 ```bash
 $ZIPPER explain <node>                     # PREFERRED: node + outgoing/incoming edges
+$ZIPPER query <question> [--depth N]       # BFS traversal from top 3 matches (broad context)
 $ZIPPER path <A> <B>                       # shortest path (BFS, undirected)
 $ZIPPER providers                          # list provider source files
 $ZIPPER find <english terms> [--limit N]   # LAST RESORT: ranked label/source matches
 ```
+
+Query output includes `source_location` (`:Lxx`), `community` (`[c=NN]`), and edge `confidence` + `confidence_score`. BFS uses per-start visited sets with global node/edge dedupe — matches native `graphify query` node counts.
 
 **Use this path when:**
 - User asks "where is X / what calls Y / how does Z reach W".
@@ -92,14 +95,64 @@ discards the incremental cache.
 Run immediately AFTER the `/graphify` subcommand finishes successfully:
 
 ```bash
-$ZIPPER compress               # ./graphify-out/ -> graphify-out.zip
+$ZIPPER compress                       # ./graphify-out/ -> graphify-out.zip (ZIP_LZMA)
+$ZIPPER compress --method 7z           # ./graphify-out/ -> graphify-out.7z (7z LZMA2)
+$ZIPPER compress --method ppmd         # ./graphify-out/ -> graphify-out.7z (7z PPMd — smallest for JSON/text)
+$ZIPPER compress --method ppmd --lean  # PPMd + drop derived files + minify JSON (smallest of all)
 $ZIPPER compress --dir /some/path --zip /some/out.zip
 ```
 
-The wrapper uses `zipfile.ZIP_BZIP2` at level 9 — the same shape the
-committed zip already has (BZip2 method, max compression). It refuses
-to zip a directory missing `graph.json` (catches the "empty rebuild"
-trap) and pre-deletes the target zip so partial output doesn't linger.
+Three compression methods:
+
+| Method | Algo | Notes |
+|---|---|---|
+| `zip` (default) | ZIP_LZMA level 9 | Stdlib only, no deps |
+| `7z` | py7zr LZMA2 level 9 | ~45% smaller than BZip2; widely compatible |
+| `ppmd` | py7zr PPMd order=32 mem=29 | ~62% smaller than BZip2 — **best for text/JSON corpora** |
+
+All produce byte-identical content on decompress (verified by sha256 + external `7z t`).
+
+### `--lean` preprocessing flag
+
+Drops files derived from `graph.json` and minifies the remaining JSON before
+compression. Stacks with any method (`zip`/`7z`/`ppmd`). Reduces archive size
+by an additional ~5-15% on top of the chosen codec.
+
+Skipped automatically (regeneratable via `graphify export *`):
+
+- `graph.html` (regen via `graphify export html`)
+- `GRAPH_REPORT.md` (regen via report.generate)
+- `obsidian/` directory (regen via `graphify export obsidian`)
+- `*.svg`, `*.graphml` exports
+
+JSON minification: `graph.json`, `manifest.json`, `cache/*.json` and any other
+`.json` get re-serialized with `separators=(',',':')`. graphify code reads
+them via `json.loads` — formatting-agnostic, no behavior change.
+
+Keep `--lean` OFF if you need to commit a `graph.html` viewer alongside the
+archive (e.g. for non-graphify viewers / GitHub web previews).
+
+### Integrity check + fallback chain
+
+After compression, the wrapper runs `7z t` (or `py7zr.testzip()` fallback) to
+verify the archive. If the chosen codec produces an invalid archive, it
+automatically retries with the next codec in chain:
+
+```
+ppmd → 7z LZMA2 → ZIP_LZMA (stdlib)
+7z   → ZIP_LZMA
+```
+
+Each fallback prints a `WARNING:` line so you know what happened.
+
+> **Requires `py7zr`** for `7z`/`ppmd`: `pip install py7zr` (not bundled).
+> On systems with externally-managed Python, use
+> `uv pip install --system --break-system-packages py7zr` or a venv.
+> Without it, both methods fall back to ZIP_LZMA with a warning.
+
+It refuses to zip a directory missing `graph.json` (catches the "empty
+rebuild" trap) and pre-deletes the target so partial output doesn't
+linger.
 
 After recompress, `graphify-out/` stays on disk (gitignored). You can
 leave it or delete it; subsequent queries should use Path 1 (zip
@@ -143,7 +196,13 @@ the equivalent commands are:
 
 ```bash
 7z x -y graphify-out.zip                                   # extract
-rm -f graphify-out.zip && 7z a -tzip -mx=9 -mm=BZip2 graphify-out.zip graphify-out   # compress
+rm -f graphify-out.zip && 7z a -tzip -mx=9 -mm=LZMA graphify-out.zip graphify-out   # compress (ZIP_LZMA)
+
+# or 7z native (smaller, produces .7z)
+rm -f graphify-out.7z && 7z a -t7z -mx=9 -m0=lzma2 graphify-out.7z graphify-out
+
+# or 7z PPMd (smallest for text/JSON)
+rm -f graphify-out.7z && 7z a -t7z -m0=PPMd:o=32:mem=29 graphify-out.7z graphify-out
 ```
 
 Both produce byte-compatible archives with the wrapper output.

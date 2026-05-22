@@ -1,15 +1,19 @@
 # graphify-zipper
 
-A [Claude Code](https://claude.com/claude-code) skill that manages the `graphify-out.zip` ↔ `graphify-out/` lifecycle for repositories that commit a [graphify](https://github.com/safishamsi/graphify) knowledge graph as a BZip2 archive and gitignore the raw directory.
+A [Claude Code](https://claude.com/claude-code) skill that manages the `graphify-out.zip` ↔ `graphify-out/` lifecycle for repositories that commit a [graphify](https://github.com/safishamsi/graphify) knowledge graph as a compressed archive and gitignore the raw directory.
 
 Built for context-mesh repos that hold many service graphs side by side: query the archive in-place, extract before a rebuild, recompress after — without ever losing the incremental cache.
 
 ## Features
 
-- **Zero-extract queries** — `explain`, `path`, `providers`, `find` read straight from the zip via Python `zipfile`.
+- **Zero-extract queries** — `query`, `explain`, `path`, `providers`, `find` read straight from the zip/7z archive.
+- **Rich query output** — node `source_location`, `community`, edge `confidence` + `confidence_score`; BFS with per-start visited sets matches native `graphify query` node counts.
 - **Safe extract / recompress** — refuses to clobber an existing `graphify-out/` and refuses to zip a directory missing `graph.json`.
-- **Stdlib only** — bundled `_zipper.py` needs no external dependencies; `pyrun.sh` auto-detects a 3.10+ interpreter on WSL, macOS, and Windows.
-- **Byte-compatible with `7z`** — uses `ZIP_BZIP2` at level 9, matching `7z a -tzip -mx=9 -mm=BZip2` output.
+- **Stdlib by default** — bundled `_zipper.py` needs no external dependencies; `pyrun.sh` auto-detects a 3.10+ interpreter.
+- **7z LZMA2 / PPMd support** — `--method 7z` uses `py7zr` LZMA2 (~45% smaller than BZip2); `--method ppmd` uses PPMd order=32 mem=29 (~62% smaller, best for text/JSON). Requires `pip install py7zr`.
+- **`--lean` preprocessing** — drops regeneratable files (`graph.html`, `GRAPH_REPORT.md`, `obsidian/`, `*.svg`, `*.graphml`) and minifies JSON. Stacks with any codec for an extra ~5-15% reduction.
+- **Integrity-checked output** — every archive verified post-write via `7z t` (or `py7zr.testzip()` fallback) and auto-retries with next codec on corruption.
+- **Auto-detect format** — reads `.zip` (ZIP_LZMA), `.7z` LZMA2 and PPMd archives transparently.
 - **JSON output** on every query subcommand for machine-readable workflows.
 
 ## Install
@@ -32,11 +36,15 @@ Claude Code auto-discovers skills under `~/.claude/skills/`. No further setup re
 ZIPPER="bash ~/.claude/skills/graphify-zipper/pyrun.sh _zipper.py"
 
 $ZIPPER explain UserService        # PREFERRED: node + neighbors
+$ZIPPER query "auth flow" [--depth N] # BFS from top 3 matches (broad context)
 $ZIPPER path Controller Repository # shortest path (BFS, undirected)
 $ZIPPER providers                  # provider source files
 $ZIPPER find auth middleware       # LAST RESORT: ranked matches when explain misses
-$ZIPPER extract [--force]          # graphify-out.zip -> ./graphify-out/
-$ZIPPER compress                   # ./graphify-out/ -> graphify-out.zip
+$ZIPPER extract [--force]              # graphify-out.zip -> ./graphify-out/
+$ZIPPER compress                       # ./graphify-out/ -> graphify-out.zip (ZIP_LZMA)
+$ZIPPER compress --method 7z           # ./graphify-out/ -> graphify-out.7z (7z LZMA2, ~45% smaller)
+$ZIPPER compress --method ppmd         # ./graphify-out/ -> graphify-out.7z (7z PPMd, ~62% smaller, best for text/JSON)
+$ZIPPER compress --method ppmd --lean  # PPMd + drop derived files + minify JSON (smallest)
 ```
 
 All subcommands accept `--zip <path>` (default `graphify-out.zip`). Query subcommands accept `--json` and `--limit N`.
@@ -83,6 +91,83 @@ The skill grew out of a context-mesh repo holding **50+ microservice graphify ou
 
 Extrapolated to a 50-repo mesh at the same mix: ~2.3 GB raw → ~130 MB zipped.
 
+### Compression benchmark — ZIP_LZMA vs 7z LZMA2
+
+10 services from a real fleet (original = prior BZip2 zip, zip = ZIP_LZMA level 9, 7z = py7zr LZMA2 level 9):
+
+| service   | orig KB | zip KB | 7z KB | zip vs orig | 7z vs orig |
+|-----------|---------|--------|-------|-------------|------------|
+| service-H | 760     | 721    | 498   | 5.3%        | 34.5%      |
+| service-I | 7,583   | 6,579  | 2,650 | 13.2%       | 65.0%      |
+| service-J | 2,621   | 2,588  | 1,812 | 1.3%        | 30.9%      |
+| service-K | 1,028   | 1,071  | 808   | -4.2%       | 21.4%      |
+| service-L | 1,219   | 1,183  | 731   | 2.9%        | 40.0%      |
+| service-M | 1,674   | 1,615  | 1,105 | 3.5%        | 34.0%      |
+| service-N | 132     | 125    | 48    | 5.1%        | 63.6%      |
+| service-O | 4,933   | 4,791  | 3,272 | 2.9%        | 33.7%      |
+| service-P | 946     | 904    | 562   | 4.5%        | 40.6%      |
+| service-Q | 1,320   | 1,237  | 716   | 6.3%        | 45.7%      |
+| **total** | **22,254**| **20,814**| **12,102**| **6.5%**    | **45.6%**  |
+
+ZIP_LZMA saves ~6% over prior BZip2. 7z LZMA2 saves **45.6%** over BZip2 — at the cost of requiring `py7zr` (`pip install py7zr`).
+
+### PPMd — best for text/JSON
+
+Knowledge graphs are JSON-heavy. PPMd (context-mixing predictor) beats LZ-family algorithms on natural-language and structured text. Benchmark on a real `graphify-out/` (1,640 files, 30.8 MB raw, 100% verified byte-identical decompress):
+
+| Method | Filter | Size | vs LZMA2 baseline |
+|---|---|---|---|
+| ZIP_LZMA preset=9 | stdlib | 1,860 KB | +97% |
+| **7z LZMA2 preset=9** (`--method 7z`) | py7zr | 969 KB | baseline |
+| 7z LZMA2 EXTREME | py7zr | 786 KB | -19% |
+| 7z BZIP2 | py7zr | 886 KB | -9% |
+| 7z ZSTD level=22 | py7zr | 865 KB | -11% |
+| 7z BROTLI level=11 | py7zr | 863 KB | -11% |
+| 7z PPMd order=16 mem=27 | py7zr | 655 KB | -32% |
+| **7z PPMd order=32 mem=29** (`--method ppmd`) | py7zr | **605 KB** | **-38%** |
+| **7z PPMd + `--lean`** | py7zr | **275 KB** | **-72%** |
+
+PPMd wins big on JSON/text — context modeling beats Lempel-Ziv variants. All decompress to byte-identical content (sha256 verified). Compression time and decompression time are within the same order of magnitude as LZMA2 (~12 s comp, ~1.4 s decomp on the benchmark corpus).
+
+### Fleet benchmark — 8 microservices, total impact
+
+Running `--method ppmd --lean` across a real 8-repo fleet:
+
+| Repo | Files | Orig `.7z` (LZMA2) | PPMd + lean | Savings |
+|---|---:|---:|---:|---:|
+| service-A (frontend) | 7351 | 2.59 MB | 1.45 MB | -44% |
+| service-B | 2885 | 3.20 MB | 1.87 MB | -42% |
+| service-C | 1564 | 1.77 MB | 1.02 MB | -42% |
+| service-D | 967 | 1.08 MB | 631 KB | -43% |
+| service-E | 867 | 731 KB | 328 KB | -55% |
+| service-F | 636 | 562 KB | 266 KB | -53% |
+| service-G | 480 | 808 KB | 368 KB | -54% |
+| service-H | 152 | 48 KB | 22.7 KB | -53% |
+| **TOTAL** | **14902** | **10.74 MB** | **5.92 MB** | **-44.9%** |
+
+Repos with denser cache content (more files, more repetition) gain more from PPMd context modeling. Extrapolated to a 50-repo mesh at this ratio: ~50 MB committed → drops to ~28 MB.
+
+### Functional parity — `--lean` archive vs raw `graphify-out/`
+
+`--lean` strips derived files and minifies JSON. Critical question: does an extracted `--lean` archive behave identically when graphify reads it? Verified on a real `graphify-out/` (service-F, 636 files):
+
+| Operation | Raw `graphify-out/` | Extracted `--method ppmd --lean` | Match |
+|---|---|---|---|
+| `graph.json` canonical SHA256 | `7e2e9c38...` | `7e2e9c38...` | ✅ identical |
+| `manifest.json` canonical SHA256 | `d5d1b569...` | `d5d1b569...` | ✅ identical |
+| `graphify query "X"` | 12 nodes, 9 edges | 12 nodes, 9 edges | ✅ semantically identical (3 lines differ only in BFS visit order — graphify does not guarantee deterministic order) |
+| `graphify path "A" "B"` | 3 hops, exact path | 3 hops, exact path | ✅ byte-identical |
+| `graphify.detect.detect_incremental(src)` | 5 new, 554 deleted, 951 total | 5 new, 554 deleted, 951 total | ✅ identical |
+| `graphify.cache.check_semantic_cache(files)` | 0/50 hit | 0/50 hit | ✅ same semantics |
+
+Why this works:
+
+- **JSON minification is content-preserving**: graphify reads every `*.json` via `json.loads`, which is whitespace-agnostic.
+- **`file_hash` hashes source files** (the `.java`/`.py`/etc. being analyzed), not graphify's own JSON artifacts. So minifying `manifest.json` doesn't invalidate cache entries — the hashes stored *inside* are string values, not computed over the JSON itself.
+- **Skipped files are pure outputs**: `graph.html`, `GRAPH_REPORT.md`, `obsidian/`, `*.svg`, `*.graphml` are generated *from* `graph.json`. graphify never reads them as input — only writes them via `graphify export *`. Regenerable on demand from a `--lean` extract.
+
+`--lean` is safe for any workflow that uses `graphify query / path / explain / --update / --cluster-only`. Re-running `graphify export html` (or `wiki`, `obsidian`, `svg`, `graphml`) after extract restores the dropped artifacts when needed.
+
 ### Query latency — zip vs raw `graph.json`
 
 3 runs each on WSL2 over NTFS, using `find` against the in-memory parsed graph:
@@ -110,13 +195,16 @@ The skill auto-activates on:
 ## Requirements
 
 - Python 3.10+ (auto-detected by `pyrun.sh`)
-- A repo that commits `graphify-out.zip` and gitignores `graphify-out/`
+- A repo that commits `graphify-out.zip` / `graphify-out.7z` and gitignores `graphify-out/`
+- `py7zr` (optional) — only needed for `--method 7z` / `--method ppmd` compression and `.7z` read.
+  Install with `pip install py7zr`. On externally-managed Python systems
+  use `uv pip install --system --break-system-packages py7zr` or a venv.
 
 > [!TIP]
-> External `7z` is **not** required — the bundled wrapper uses stdlib `zipfile` with `ZIP_BZIP2`. If `7z` is already installed and preferred, `7z x -y graphify-out.zip` and `7z a -tzip -mx=9 -mm=BZip2 graphify-out.zip graphify-out` produce byte-compatible archives.
+> External `7z` binary is **not** required. Default uses stdlib `zipfile` with `ZIP_LZMA`. With `py7zr` installed, `--method 7z` produces `.7z` archives ~45% smaller, and `--method ppmd` produces ~62% smaller archives on text/JSON-heavy corpora.
 
 > [!WARNING]
-> Do not fall back to stock `zip`/`unzip`. The committed archive uses the BZip2 method; deflate changes the archive byte-for-byte and will surface as a noisy diff on every commit.
+> Do not fall back to stock `zip`/`unzip`. The committed archive uses LZMA method; deflate changes the archive byte-for-byte and will surface as a noisy diff on every commit.
 
 ## Related
 
