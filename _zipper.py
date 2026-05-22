@@ -13,7 +13,7 @@ Subcommands:
 Common flags:
   --zip <path>            archive path (default: graphify-out.zip)
   --source <zip|dir>      read from archive (default) or graphify-out/ dir
-  --method <zip|7z|ppmd>  compress: zip=stdlib ZIP_LZMA, 7z=py7zr LZMA2, ppmd=PPMd (max)
+  --method <zip|7z|ppmd|zpaq>  zip=stdlib ZIP_LZMA, 7z=py7zr LZMA2, ppmd=PPMd, zpaq=zpaq -m5
   --json                  emit JSON
   --limit N               cap find results (default: 15)
   --depth N               BFS depth for query (default: 2)
@@ -23,6 +23,8 @@ Notes:
   - ZIP_LZMA: stdlib, ~10% smaller than BZip2.
   - 7z LZMA2: requires py7zr, ~45% smaller than BZip2.
   - PPMd: requires py7zr, ~62% smaller than BZip2 (best for text/JSON).
+  - zpaq -m5: requires zpaq binary, beats PPMd on dense backend repos
+    (~15-25% smaller) but ~14x slower. Opt-in for heavy backend archives.
 """
 from __future__ import annotations
 
@@ -118,25 +120,49 @@ def _ensure_py7zr():
 
 
 def _resolve_archive(path: str | Path) -> Path:
-    """Return existing archive path. If `.zip` missing, try `.7z` sibling."""
+    """Return existing archive path. If missing, try .7z / .zpaq sibling."""
     p = Path(path)
     if p.exists():
         return p
-    alt = p.with_suffix(".7z")
-    if alt.exists():
-        return alt
+    for ext in (".7z", ".zpaq", ".zip"):
+        alt = p.with_suffix(ext)
+        if alt.exists():
+            return alt
     raise ZipperError(f"{p} not found")
+
+
+def _zpaq_bin() -> str | None:
+    """Locate zpaq binary."""
+    return shutil.which("zpaq")
 
 
 @contextmanager
 def _open_inner(archive: Path, inner: str) -> Iterator[bytes]:
-    """Yield raw bytes of `inner` inside archive (zip or 7z)."""
+    """Yield raw bytes of `inner` inside archive (zip, 7z, or zpaq)."""
     if archive.suffix == ".7z":
         py7zr = _ensure_py7zr()
         if py7zr is None:
             raise ZipperError("py7zr required to read .7z files (auto-install failed)")
         with py7zr.SevenZipFile(archive, "r") as z7, tempfile.TemporaryDirectory() as tmp:
             z7.extract(path=tmp, targets=[inner])
+            target = Path(tmp) / inner
+            if not target.exists():
+                raise ZipperError(f"{inner} not in {archive}")
+            yield target.read_bytes()
+        return
+    if archive.suffix == ".zpaq":
+        zpaq = _zpaq_bin()
+        if zpaq is None:
+            raise ZipperError("zpaq binary required to read .zpaq files (install via apt)")
+        with tempfile.TemporaryDirectory() as tmp:
+            # zpaq stores paths relative; running from tmp cwd materializes
+            # `inner` at tmp/<inner>. No reliable -to syntax for single file.
+            r = subprocess.run(
+                [zpaq, "x", str(archive.resolve()), inner, "-force"],
+                cwd=tmp, capture_output=True, text=True, timeout=300,
+            )
+            if r.returncode != 0:
+                raise ZipperError(f"zpaq extract failed: {r.stderr[-200:]}")
             target = Path(tmp) / inner
             if not target.exists():
                 raise ZipperError(f"{inner} not in {archive}")
@@ -167,6 +193,19 @@ def _extract_archive(archive: Path, out_dir: Path) -> None:
             raise ZipperError("py7zr required to extract .7z files (auto-install failed)")
         with py7zr.SevenZipFile(archive, "r") as z7:
             z7.extractall(out_dir)
+        return
+    if archive.suffix == ".zpaq":
+        zpaq = _zpaq_bin()
+        if zpaq is None:
+            raise ZipperError("zpaq binary required to extract .zpaq files (install via apt)")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # zpaq writes paths relative to cwd; cd into out_dir for predictable layout.
+        r = subprocess.run(
+            [zpaq, "x", str(archive.resolve()), "-force"],
+            cwd=out_dir, capture_output=True, text=True, timeout=600,
+        )
+        if r.returncode != 0:
+            raise ZipperError(f"zpaq extract failed: {r.stderr[-300:]}")
         return
     with zipfile.ZipFile(archive) as z:
         z.extractall(out_dir)
@@ -445,6 +484,18 @@ def _verify_7z(archive: Path) -> bool:
         return False
 
 
+def _verify_zpaq(archive: Path) -> bool:
+    """Test zpaq archive integrity via `zpaq l` (lists contents; non-zero exit on corruption)."""
+    zpaq = _zpaq_bin()
+    if zpaq is None:
+        return False
+    try:
+        r = subprocess.run([zpaq, "l", str(archive)], capture_output=True, text=True, timeout=300)
+        return r.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _prepare_files(
     files: list[Path],
     src_dir: Path,
@@ -533,6 +584,51 @@ def cmd_compress(args, _data=None) -> None:
         print(f"WARNING: {label} archive failed integrity check; trying next codec")
         zip_path.unlink()
         return False
+
+    def _try_zpaq(label: str, *, skip_derived: bool, minify_json: bool) -> bool:
+        """Compress lean files with zpaq -m5 + integrity check."""
+        zpaq = _zpaq_bin()
+        if zpaq is None:
+            print(f"{label} skipped: zpaq binary not found (install: apt-get install zpaq)")
+            return False
+        prepared, stats = _prepare_files(files, src_dir, skip_derived=skip_derived, minify_json=minify_json)
+        with tempfile.TemporaryDirectory() as staging_root:
+            staging = Path(staging_root)
+            arcnames: list[str] = []
+            for arcname, data in prepared:
+                dest = staging / arcname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                arcnames.append(arcname)
+            try:
+                r = subprocess.run(
+                    [zpaq, "a", str(zip_path.resolve()), *sorted(arcnames), "-m5"],
+                    cwd=staging, capture_output=True, text=True, timeout=1800,
+                )
+                if r.returncode != 0:
+                    print(f"{label} failed: {r.stderr[-200:]}; trying next codec")
+                    if zip_path.exists():
+                        zip_path.unlink()
+                    return False
+            except subprocess.TimeoutExpired:
+                print(f"{label} timed out; trying next codec")
+                if zip_path.exists():
+                    zip_path.unlink()
+                return False
+        if _verify_zpaq(zip_path):
+            size = zip_path.stat().st_size
+            note = _lean_note(stats) if (skip_derived or minify_json) else ""
+            print(f"compressed {src_dir} -> {zip_path} ({size:,} bytes, {label}){note}")
+            return True
+        print(f"WARNING: {label} archive failed integrity check; trying next codec")
+        zip_path.unlink()
+        return False
+
+    if args.method == "zpaq":
+        if _try_zpaq("zpaq -m5" + (" + lean" if args.lean else ""), skip_derived=args.lean, minify_json=args.lean):
+            return
+        print("zpaq compression failed, falling back to PPMd")
+        args.method = "ppmd"  # cascade to py7zr path
 
     if args.method in ("7z", "ppmd"):
         py7zr = _ensure_py7zr()
@@ -690,8 +786,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pc = sub.add_parser("compress", help="build archive from graphify-out/")
     pc.add_argument("--dir", default=DEFAULT_DIR, help="source dir (default: graphify-out)")
-    pc.add_argument("--method", default="zip", choices=["zip", "7z", "ppmd"],
-                    help="zip=ZIP_LZMA (default), 7z=py7zr LZMA2, ppmd=py7zr PPMd (max)")
+    pc.add_argument("--method", default="zip", choices=["zip", "7z", "ppmd", "zpaq"],
+                    help="zip=ZIP_LZMA (default), 7z=py7zr LZMA2, ppmd=py7zr PPMd, "
+                         "zpaq=zpaq -m5 (best for dense backend repos, ~14x slower)")
     pc.add_argument("--lean", action="store_true",
                     help="skip derived files (graph.html, GRAPH_REPORT.md, obsidian/, *.svg, *.graphml) "
                          "and minify JSON before compressing; regenerate derived via `graphify export *`")

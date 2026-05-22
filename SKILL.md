@@ -97,20 +97,27 @@ Run immediately AFTER the `/graphify` subcommand finishes successfully:
 ```bash
 $ZIPPER compress                       # ./graphify-out/ -> graphify-out.zip (ZIP_LZMA)
 $ZIPPER compress --method 7z           # ./graphify-out/ -> graphify-out.7z (7z LZMA2)
-$ZIPPER compress --method ppmd         # ./graphify-out/ -> graphify-out.7z (7z PPMd — smallest for JSON/text)
-$ZIPPER compress --method ppmd --lean  # PPMd + drop derived files + minify JSON (smallest of all)
+$ZIPPER compress --method ppmd         # ./graphify-out/ -> graphify-out.7z (7z PPMd — smallest single-codec for JSON/text)
+$ZIPPER compress --method ppmd --lean  # PPMd + drop derived files + minify JSON
+$ZIPPER compress --method zpaq --lean  # zpaq -m5 + lean (smallest for dense backend repos; ~14x slower)
 $ZIPPER compress --dir /some/path --zip /some/out.zip
 ```
 
-Three compression methods:
+Four compression methods:
 
 | Method | Algo | Notes |
 |---|---|---|
 | `zip` (default) | ZIP_LZMA level 9 | Stdlib only, no deps |
 | `7z` | py7zr LZMA2 level 9 | ~45% smaller than BZip2; widely compatible |
-| `ppmd` | py7zr PPMd order=32 mem=29 | ~62% smaller than BZip2 — **best for text/JSON corpora** |
+| `ppmd` | py7zr PPMd order=32 mem=29 | ~62% smaller than BZip2 — best single-codec for text/JSON |
+| `zpaq` | zpaq -m5 (context mixing) | **~20% smaller than PPMd on dense backend repos** (>50 KB); requires `zpaq` binary (`apt-get install zpaq`); ~14x slower than PPMd; loses on tiny repos (<50 KB) due to fixed overhead |
 
-All produce byte-identical content on decompress (verified by sha256 + external `7z t`).
+All produce byte-identical content on decompress (verified by sha256 + external `7z t` / `zpaq l`).
+
+**Method selection guidance:**
+- Default `zip`: maximum portability, no dependencies.
+- `ppmd`: best ratio for most repos; works on any corpus size.
+- `zpaq`: opt-in for heavy backend repos (Java/Spring etc.) where the extra ~20% saving over PPMd is worth the slower compress time. Skip for repos under ~50 KB.
 
 ### `--lean` preprocessing flag
 
@@ -139,7 +146,8 @@ verify the archive. If the chosen codec produces an invalid archive, it
 automatically retries with the next codec in chain:
 
 ```
-ppmd → 7z LZMA2 → ZIP_LZMA (stdlib)
+zpaq → ppmd → 7z LZMA2 → ZIP_LZMA (stdlib)
+ppmd → 7z LZMA2 → ZIP_LZMA
 7z   → ZIP_LZMA
 ```
 

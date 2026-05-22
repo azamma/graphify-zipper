@@ -10,10 +10,10 @@ Built for context-mesh repos that hold many service graphs side by side: query t
 - **Rich query output** — node `source_location`, `community`, edge `confidence` + `confidence_score`; BFS with per-start visited sets matches native `graphify query` node counts.
 - **Safe extract / recompress** — refuses to clobber an existing `graphify-out/` and refuses to zip a directory missing `graph.json`.
 - **Stdlib by default** — bundled `_zipper.py` needs no external dependencies; `pyrun.sh` auto-detects a 3.10+ interpreter.
-- **7z LZMA2 / PPMd support** — `--method 7z` uses `py7zr` LZMA2 (~45% smaller than BZip2); `--method ppmd` uses PPMd order=32 mem=29 (~62% smaller, best for text/JSON). Requires `pip install py7zr`.
+- **7z LZMA2 / PPMd / zpaq support** — `--method 7z` uses `py7zr` LZMA2 (~45% smaller than BZip2); `--method ppmd` uses PPMd order=32 mem=29 (~62% smaller, best single-codec for text/JSON); `--method zpaq` uses zpaq -m5 (~20% smaller than PPMd on dense backend repos >50 KB, ~14x slower).
 - **`--lean` preprocessing** — drops regeneratable files (`graph.html`, `GRAPH_REPORT.md`, `obsidian/`, `*.svg`, `*.graphml`) and minifies JSON. Stacks with any codec for an extra ~5-15% reduction.
 - **Integrity-checked output** — every archive verified post-write via `7z t` (or `py7zr.testzip()` fallback) and auto-retries with next codec on corruption.
-- **Auto-detect format** — reads `.zip` (ZIP_LZMA), `.7z` LZMA2 and PPMd archives transparently.
+- **Auto-detect format** — reads `.zip` (ZIP_LZMA), `.7z` (LZMA2 / PPMd), and `.zpaq` archives transparently.
 - **JSON output** on every query subcommand for machine-readable workflows.
 
 ## Install
@@ -44,7 +44,8 @@ $ZIPPER extract [--force]              # graphify-out.zip -> ./graphify-out/
 $ZIPPER compress                       # ./graphify-out/ -> graphify-out.zip (ZIP_LZMA)
 $ZIPPER compress --method 7z           # ./graphify-out/ -> graphify-out.7z (7z LZMA2, ~45% smaller)
 $ZIPPER compress --method ppmd         # ./graphify-out/ -> graphify-out.7z (7z PPMd, ~62% smaller, best for text/JSON)
-$ZIPPER compress --method ppmd --lean  # PPMd + drop derived files + minify JSON (smallest)
+$ZIPPER compress --method ppmd --lean  # PPMd + drop derived files + minify JSON (smallest single-codec)
+$ZIPPER compress --method zpaq --lean  # zpaq -m5 + lean (smallest for dense backend repos >50 KB)
 ```
 
 All subcommands accept `--zip <path>` (default `graphify-out.zip`). Query subcommands accept `--json` and `--limit N`.
@@ -126,6 +127,7 @@ Knowledge graphs are JSON-heavy. PPMd (context-mixing predictor) beats LZ-family
 | 7z PPMd order=16 mem=27 | py7zr | 655 KB | -32% |
 | **7z PPMd order=32 mem=29** (`--method ppmd`) | py7zr | **605 KB** | **-38%** |
 | **7z PPMd + `--lean`** | py7zr | **275 KB** | **-72%** |
+| **zpaq -m5 + `--lean`** | zpaq | **226 KB** | **-77%** |
 
 PPMd wins big on JSON/text — context modeling beats Lempel-Ziv variants. All decompress to byte-identical content (sha256 verified). Compression time and decompression time are within the same order of magnitude as LZMA2 (~12 s comp, ~1.4 s decomp on the benchmark corpus).
 
@@ -146,6 +148,25 @@ Running `--method ppmd --lean` across a real 8-repo fleet:
 | **TOTAL** | **14902** | **10.74 MB** | **5.92 MB** | **-44.9%** |
 
 Repos with denser cache content (more files, more repetition) gain more from PPMd context modeling. Extrapolated to a 50-repo mesh at this ratio: ~50 MB committed → drops to ~28 MB.
+
+### zpaq -m5 vs PPMd on backend microservices
+
+`--method zpaq` is opt-in for repos where the extra compression is worth the slower compress time. Bench on 7 backend microservices:
+
+| Repo | PPMd + lean | zpaq -m5 + lean | Δ | Compress time |
+|---|---:|---:|---:|---:|
+| service-C | 1.01 MB | 763 KB | **-26.5%** | 64s |
+| service-G | 367 KB | 274 KB | **-25.3%** | 26s |
+| service-E | 326 KB | 286 KB | -12.3% | 19s |
+| service-D | 629 KB | 488 KB | -22.4% | 41s |
+| service-H (tiny) | 22 KB | 29 KB | **+28%** ❌ | 1s |
+| service-B | 1.86 MB | 1.44 MB | -22.7% | 95s |
+| service-F | 264 KB | 220 KB | -16.6% | 17s |
+| **TOTAL (6/7 win)** | **4.45 MB** | **3.45 MB** | **-22.4%** | 262s |
+
+**Decision rule**: use `zpaq` when the PPMd archive is ≥50 KB. For smaller archives, zpaq's fixed overhead exceeds its compression gain.
+
+Compress time: zpaq is ~5-15x slower than PPMd. For CI auto-rebuild this is acceptable (one-shot per commit). For interactive workflows, stick with PPMd.
 
 ### Functional parity — `--lean` archive vs raw `graphify-out/`
 
