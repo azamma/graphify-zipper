@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="graphify-zipper" width="320">
+</p>
+
 # graphify-zipper
 
 A [Claude Code](https://claude.com/claude-code) skill that manages the `graphify-out.zip` ↔ `graphify-out/` lifecycle for repositories that commit a [graphify](https://github.com/safishamsi/graphify) knowledge graph as a compressed archive and gitignore the raw directory.
